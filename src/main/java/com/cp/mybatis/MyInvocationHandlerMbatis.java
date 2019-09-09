@@ -5,6 +5,7 @@ import com.cp.mybatis.annotation.ExtSelect;
 import com.cp.mybatis.utils.JDBCUtils;
 import com.cp.mybatis.utils.SQLUtils;
 
+import java.lang.reflect.Field;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -14,6 +15,8 @@ import	java.util.concurrent.ConcurrentHashMap;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Description:
@@ -32,10 +35,11 @@ public class MyInvocationHandlerMbatis implements InvocationHandler {
         this.subject = subject;
     }
 
+    @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         // 判断方法上是否有ExtInsert注解
         ExtInsert extInsert = method.getAnnotation(ExtInsert.class);
-        if(extInsert != null){
+        if (extInsert != null) {
             return insertSQL(extInsert, method, args);
         }
         // 判断方法上注解类型
@@ -47,7 +51,7 @@ public class MyInvocationHandlerMbatis implements InvocationHandler {
         return null;
     }
 
-    private Object selectMybatis(ExtSelect extSelect, Method method, Object[] args) {
+    private Object selectMybatis(ExtSelect extSelect, Method method, Object[] args) throws SQLException {
 
         try {
             // 获取查询SQL语句
@@ -72,7 +76,7 @@ public class MyInvocationHandlerMbatis implements InvocationHandler {
             ResultSet rs = JDBCUtils.query(newSql, parameValues);
             // 获取返回类型
             Class<?> returnType = method.getReturnType();
-            if(!rs.next()){
+            if (!rs.next()) {
                 // 没有查找数据
                 return null;
             }
@@ -81,10 +85,37 @@ public class MyInvocationHandlerMbatis implements InvocationHandler {
 
             // 实例化对象
             Object newInstance = returnType.newInstance();
+            while (rs.next()) {
+                Field[] declaredFields = returnType.getDeclaredFields();
+                for(Field field : declaredFields){
+                    String fileName = field.getName();
+                    String fileNameWithLine = humpToLine(fileName);
+                    // 获取集合中数据
+                    Object value = rs.getObject(fileNameWithLine);
+                    // 设置允许私有访问
+                    field.setAccessible(true);
+                    // 赋值参数
+                    field.set(newInstance, value);
+                }
 
 
+//                for (String parameterName : sqlSelectParameter) {
+//                    // 获取集合中数据
+//                    Object value = rs.getObject(parameterName);
+//                    // 查找对应属性
+//                    String s = lineToHump(parameterName);
+//                    Field field = returnType.getDeclaredField(s);
+//                    // 设置允许私有访问
+//                    field.setAccessible(true);
+//                    // 赋值参数
+//                    field.set(newInstance, value);
+//                }
 
-        } catch (SQLException e) {
+            }
+
+            return newInstance;
+
+        } catch (Exception e) {
             e.printStackTrace();
         }
 
@@ -93,26 +124,76 @@ public class MyInvocationHandlerMbatis implements InvocationHandler {
     }
 
     private Object insertSQL(ExtInsert extInsert, Method method, Object[] args) {
-        return null;
+        // 获取注解上的sql
+        String insertSql = extInsert.value();
+        System.out.println("sql:" + insertSql);
+        // 获取方法上的参数
+        Parameter[] parameters = method.getParameters();
+        // 将方法上的参数存放在Map集合中
+        ConcurrentHashMap<Object, Object> parameterMap = getExtParams(parameters, args);
+        // 获取SQL语句上需要传递的参数
+        String[] sqlParameter = SQLUtils.sqlInsertParameter(insertSql);
+        List<Object> parameValues = new ArrayList<>();
+        for (int i = 0; i < sqlParameter.length; i++) {
+            String str = sqlParameter[i];
+            Object object = parameterMap.get(str);
+            parameValues.add(object);
+        }
+        // 将SQL语句替换为？号
+        String newSql = SQLUtils.parameQuestion(insertSql, sqlParameter);
+        System.out.println("newSql:" + newSql);
+        // 调用jdbc代码执行
+        int insertResult = JDBCUtils.insert(newSql, false, parameValues);
+        return insertResult;
+
     }
 
     /**
      * 获取方法上参数集合
+     *
      * @param parameters
      * @param args
      * @return
      */
-    private ConcurrentHashMap<Object, Object> getExtParams(Parameter [] parameters, Object [] args){
-        ConcurrentHashMap<Object, Object> paramMap = new ConcurrentHashMap<Object, Object> ();
+    private ConcurrentHashMap<Object, Object> getExtParams(Parameter[] parameters, Object[] args) {
+        ConcurrentHashMap<Object, Object> paramMap = new ConcurrentHashMap<Object, Object>();
         for (int i = 0; i < parameters.length; i++) {
             Parameter parameter = parameters[i];
-            ExtParam extParam  = parameter.getDeclaredAnnotation(ExtParam.class);
+            ExtParam extParam = parameter.getDeclaredAnnotation(ExtParam.class);
             // 参数名称
-            String paramValue  = extParam.value();
+            String paramValue = extParam.value();
             // 参数值
             Object arg = args[i];
             paramMap.put(paramValue, arg);
         }
+        return paramMap;
     }
+
+    public static Pattern linePattern = Pattern.compile("_(\\w)");
+
+    /**下划线转驼峰*/
+    public static String lineToHump(String str){
+        str = str.toLowerCase();
+        Matcher matcher = linePattern.matcher(str);
+        StringBuffer sb = new StringBuffer();
+        while(matcher.find()){
+            matcher.appendReplacement(sb, matcher.group(1).toUpperCase());
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
+    private static Pattern humpPattern = Pattern.compile("[A-Z]");
+    /**驼峰转下划线*/
+    public static String humpToLine(String str){
+        Matcher matcher = humpPattern.matcher(str);
+        StringBuffer sb = new StringBuffer();
+        while(matcher.find()){
+            matcher.appendReplacement(sb, "_"+matcher.group(0).toLowerCase());
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
 
 }
